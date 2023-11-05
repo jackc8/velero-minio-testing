@@ -1,0 +1,181 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    kubernetes.io/metadata.name: velero
+  name: velero
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+    labels:
+        app: minio
+    name: minio
+    namespace: velero
+spec:
+  selector:
+    matchLabels:
+      app: minio
+  template:
+    metadata:
+      labels:
+        app: minio
+    spec:
+      containers:
+        -   name: minio
+            image: quay.io/minio/minio
+            ports:
+                -   containerPort: 9001
+                -   containerPort: 9000
+            command:
+                - /bin/bash
+                - -c
+            args:
+                - minio server /data --console-address :9001
+            volumeMounts:
+                -   mountPath: /data
+                    name: minio
+            env:
+                -   name: MINIO_BROWSER_LOGIN_ANIMATION
+                    value: "off"
+                -   name: MINIO_ROOT_USER
+                    value: admin
+                -   name: MINIO_ROOT_PASSWORD
+                    value: ag6MU60n0@2
+      volumes:
+        -   name: minio
+            emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+    name: minio
+    namespace: velero
+spec:
+    type: ClusterIP
+    selector:
+        app: minio
+    ports:
+        -   protocol: TCP
+            port: 9001
+            targetPort: 9001
+            name: minioconsole
+        -   protocol: TCP
+            port: 9000
+            targetPort: 9000
+            name: minios3
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minio-setup
+  namespace: velero
+  labels:
+    component: minio
+spec:
+  template:
+    metadata:
+      name: minio-setup
+    spec:
+      restartPolicy: OnFailure
+      volumes:
+      - name: config
+        emptyDir: {}
+      containers:
+      - name: mc
+        env:
+        - name: MINIO_BROWSER_LOGIN_ANIMATION
+          value: "off"
+        image: minio/mc:latest
+        imagePullPolicy: IfNotPresent
+        command:
+        - /bin/sh
+        - -c
+        - "mc --config-dir=/config config host add velero http://minio:9000 admin ag6MU60n0@2 && mc --config-dir=/config mb -p velero/velero"
+        volumeMounts:
+        - name: config
+          mountPath: "/config"
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+    name: minios3
+    namespace: velero
+    annotations:
+        kubernetes.io/ingress.class: nginx
+        nginx.ingress.kubernetes.io/proxy-body-size: 102400m
+        nginx.org/server-snippets: |
+            ignore_invalid_headers off;
+            client_max_body_size 0;
+            proxy_buffering off;
+            proxy_request_buffering off;
+            
+            location / {
+                proxy_set_header Host $http_host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                
+                proxy_connect_timeout 300;
+                proxy_http_version 1.1;
+                proxy_set_header Connection "";
+                chunked_transfer_encoding off;
+                proxy_pass http://minio:9000;
+            }
+spec:
+    rules:
+        -   host: s3.192.168.0.9.nip.io
+            http:
+                paths:
+                    -   path: /
+                        pathType: Prefix
+                        backend:
+                            service:
+                                name: minio
+                                port:
+                                    number: 9000
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+    name: minioconsole
+    namespace: velero
+    annotations:
+        kubernetes.io/ingress.class: nginx
+        nginx.ingress.kubernetes.io/proxy-body-size: 102400m
+        nginx.org/server-snippets: |
+            ignore_invalid_headers off;
+            client_max_body_size 0;
+            proxy_buffering off;
+            proxy_request_buffering off;
+            
+            location / {
+                proxy_set_header Host $http_host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                proxy_set_header X-NginX-Proxy true;
+        
+                real_ip_header X-Real-IP;
+                
+                proxy_connect_timeout 300;
+        
+                proxy_http_version 1.1;
+                proxy_set_header Upgrade $http_upgrade;
+                proxy_set_header Connection "upgrade";
+                
+                chunked_transfer_encoding off;
+                proxy_pass http://minio:9001;
+            }
+spec:
+    rules:
+      -   host: minio.192.168.0.9.nip.io
+            http:
+                paths:
+                    -   path: /
+                        pathType: Prefix
+                        backend:
+                            service:
+                                name: minio
+                                port:
+                                    number: 9001
